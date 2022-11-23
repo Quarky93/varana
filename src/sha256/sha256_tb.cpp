@@ -6,11 +6,15 @@ const char* EXPECTED_HASH = "9c827201b94019b42f85706bc49c59ff84b5604d11caafb90ab
 int test_sha256() {
     ap_uint<256> in_hash(IN_HASH, 16);
     ap_uint<256> expected_hash(EXPECTED_HASH, 16);
+    hls::stream<hash_pkt_t> in_queue;
+    hls::stream<hash_pkt_t> out_queue;
 
+    in_queue.write({in_hash, 1});
     std::cout << "Starting the core..." << std::endl;
-    ap_uint<256> out_hash = sha256(in_hash);
-    if (out_hash != expected_hash) {
-        std::cout << "out_hash = " << out_hash.to_string(16, true).c_str() << std::endl;
+    sha256(in_queue, out_queue);
+    hash_pkt_t result = out_queue.read();
+    if (result.data != expected_hash) {
+        std::cout << "result.data = " << result.data.to_string(16, true).c_str() << std::endl;
         return 1;
     }
     std::cout << "Success!" << std::endl;

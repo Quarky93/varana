@@ -1,4 +1,5 @@
-#include <ap_int.h>
+#include "sha256.h"
+#include <hls_print.h>
 
 // Various logic functions
 // #define Ch(x,y,z)       (z ^ (x & (y ^ z)))
@@ -9,6 +10,8 @@
 #define Sigma1(x)       (rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25))
 #define Gamma0(x)       (rotr(x, 7) ^ rotr(x, 18) ^ ((x) >> 3))
 #define Gamma1(x)       (rotr(x, 17) ^ rotr(x, 19) ^ ((x) >> 10))
+
+using namespace hls;
 
 using state_t = struct state_t {
     ap_uint<32> a;
@@ -149,10 +152,38 @@ static ap_uint<512> process_sha256(ap_uint<512> padded_msg) {
     return (state.a, state.b, state.c, state.d, state.e, state.f, state.g, state.h);
 }
 
+static void ingress(stream<hash_pkt_t> &in, stream<hash_pkt_t> &recycle_in, stream<hash_pkt_t> &out) {
+#pragma HLS PIPELINE II=1
+    hash_pkt_t hash_pkt;
+    if (recycle_in.read_nb(hash_pkt)) {
+        out.write(hash_pkt);
+    } else if (in.read_nb(hash_pkt)) {
+        out.write(hash_pkt);
+    }
+}
+
+static void compute(stream<hash_pkt_t> &in, stream<hash_pkt_t> &recycle_out, stream<hash_pkt_t> &out) {
+#pragma HLS PIPELINE II=1 style=frp
+#pragma HLS INLINE recursive
+    hash_pkt_t hash_pkt = in.read();
+    hash_pkt.data = process_sha256(pad_message(hash_pkt.data));
+    hash_pkt.recycle -= 1;
+    if (hash_pkt.recycle == 0) {
+        out.write(hash_pkt);
+    } else {
+        recycle_out.write(hash_pkt);
+    }
+}
+
 // Top function. Computes and returns the SHA-256 hash of the input 256-bit msg.
-ap_uint<256> sha256(ap_uint<256> msg) {
-    return process_sha256(pad_message(msg));
-    // WARNING: the following computes wrong results and is not equivalent to the line above:
-    // ap_uint<256> padded_msg = pad_message(msg);
-    // return process_sha256(padded_msg);
+void sha256(stream<hash_pkt_t> &in, stream<hash_pkt_t> &out) {
+#pragma HLS INTERFACE mode=ap_ctrl_none port=return
+#pragma HLS INTERFACE mode=axis port=in
+#pragma HLS INTERFACE mode=axis port=out
+#pragma HLS AGGREGATE variable=in compact=byte
+#pragma HLS AGGREGATE variable=out compact=byte
+    hls_thread_local stream<hash_pkt_t, 32> recycle_queue;
+    hls_thread_local stream<hash_pkt_t, 2> ingress_to_compute_queue;
+    hls_thread_local task t1(ingress, in, recycle_queue, ingress_to_compute_queue);
+    hls_thread_local task t2(compute, ingress_to_compute_queue, recycle_queue, out);
 }
