@@ -162,17 +162,31 @@ static void ingress(stream<hash_pkt_t> &in, stream<hash_pkt_t> &recycle_in, stre
     }
 }
 
-static void compute(stream<hash_pkt_t> &in, stream<hash_pkt_t> &recycle_out, stream<hash_pkt_t> &out) {
+static void compute(stream<hash_pkt_t> &in, stream<hash_pkt_t> &out) {
 #pragma HLS PIPELINE II=1 style=frp
 #pragma HLS INLINE recursive
     hash_pkt_t hash_pkt = in.read();
-    hash_pkt.data = process_sha256(pad_message(hash_pkt.data));
-    hash_pkt.recycle -= 1;
+    if (hash_pkt.recycle != 0) {
+        hash_pkt.data = process_sha256(pad_message(hash_pkt.data));
+        hash_pkt.recycle -= 1;
+    }
+    out.write(hash_pkt);
+}
+
+static void egress(stream<hash_pkt_t> &in, stream<hash_pkt_t> &out, stream<hash_pkt_t> &recycle_out) {
+#pragma HLS PIPELINE II=1
+    hash_pkt_t hash_pkt = in.read();
     if (hash_pkt.recycle == 0) {
         out.write(hash_pkt);
     } else {
         recycle_out.write(hash_pkt);
     }
+}
+
+static void recycle_pipe(stream<hash_pkt_t> &in, stream<hash_pkt_t> &out) {
+#pragma HLS PIPELINE II=1
+#pragma HLS LATENCY min=8
+    out << in.read();
 }
 
 // Top function. Computes and returns the SHA-256 hash of the input 256-bit msg.
@@ -182,8 +196,18 @@ void sha256(stream<hash_pkt_t> &in, stream<hash_pkt_t> &out) {
 #pragma HLS INTERFACE mode=axis port=out
 #pragma HLS AGGREGATE variable=in compact=byte
 #pragma HLS AGGREGATE variable=out compact=byte
-    hls_thread_local stream<hash_pkt_t, 32> recycle_queue;
+    static constexpr int N_COMPUTE_UNITS = 16;
+    hls_thread_local stream<hash_pkt_t, 2> recycle_queue_start;
+    hls_thread_local stream<hash_pkt_t, 2> recycle_queue_end;
     hls_thread_local stream<hash_pkt_t, 2> ingress_to_compute_queue;
-    hls_thread_local task t1(ingress, in, recycle_queue, ingress_to_compute_queue);
-    hls_thread_local task t2(compute, ingress_to_compute_queue, recycle_queue, out);
+    hls_thread_local stream<hash_pkt_t, 2> compute_queues[N_COMPUTE_UNITS + 1];
+    hls_thread_local task t_compute[N_COMPUTE_UNITS];
+
+    hls_thread_local task t_ingress(ingress, in, recycle_queue_end, compute_queues[0]);
+    for (int i = 0; i < N_COMPUTE_UNITS; i++) {
+#pragma HLS UNROLL
+        t_compute[i](compute, compute_queues[i], compute_queues[i+1]);
+    }
+    hls_thread_local task t_egress(egress, compute_queues[N_COMPUTE_UNITS], out, recycle_queue_start);
+    hls_thread_local task t_recycle(recycle_pipe, recycle_queue_start, recycle_queue_end);
 }
